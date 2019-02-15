@@ -1,0 +1,16 @@
+[package]
+name = "hello"
+version = "0.1.0"
+authors = ["Pedro Gameiro <>"]
+edition = "2018"
+
+[dependencies]
+
+json = "0.11.13"
+hex = "0.3.2"
+md5 = "0.6.1"
+aes = "0.3.2"
+nom = "4.2.0"
+byteorder = "1.3.1"
+bincode = "1.1.1"
+serde = "1.0.87"
