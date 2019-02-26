@@ -1,0 +1,35 @@
+name: miioclirust
+version: "1.0"
+about: Does awesome things
+args:
+    - ip:
+        short: i
+        long: ip
+        value_name: address
+        help: Miio device network address
+        takes_value: true
+    - port:
+          short: p
+          long: port
+          value_name: udp port
+          help: Miio device network address port
+          takes_value: true
+    - token:
+        short: t
+        long: token
+        value_name: token
+        help: Miio device token
+        takes_value: true
+    - method:
+          short: m
+          long: method
+          value_name: method
+          help: Miio method
+          takes_value: true
+    - arguments:
+        short: a
+        long: arguments
+        value_name: arguments
+        help: Miio method arguments
+        takes_value: true
+        multiple: true
