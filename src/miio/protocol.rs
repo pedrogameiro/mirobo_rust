@@ -1,15 +1,6 @@
 
 use crypto::{aes, md5, digest::Digest};
-use crypto::buffer::{ ReadBuffer, WriteBuffer}; //, BufferResult };
-
-pub fn md5sum(data: &[u8]) -> [u8; 16] {
-    let mut md5_codec = md5::Md5::new();
-    let mut output: [u8; 16] = [0; 16];
-
-    md5_codec.input(data);
-    md5_codec.result(&mut output);
-    output
-}
+use crypto::buffer::WriteBuffer; //, BufferResult };
 
 pub fn aes_encrypt<'a>(data: &[u8], out_buffer: &'a mut [u8], key: &[u8], iv: &[u8]) -> &'a mut [u8] {
     let mut aes_coder = aes::cbc_encryptor(
@@ -43,7 +34,7 @@ pub fn aes_decrypt<'a>(data: &[u8], out_buffer: &'a mut [u8], key: &[u8], iv: &[
         let mut read_buffer = crypto::buffer::RefReadBuffer::new(data);
         let mut write_buffer = crypto::buffer::RefWriteBuffer::new(out_buffer);
 
-        aes_decoder.decrypt(&mut read_buffer, &mut write_buffer, true).unwrap();
+        aes_decoder.decrypt(&mut read_buffer, &mut write_buffer, true).expect("Unable to decrypt message");
         len = write_buffer.position();
     }
 

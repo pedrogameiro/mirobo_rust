@@ -14,60 +14,10 @@ use std::borrow::Borrow;
 use miio::header::MiioHeader;
 use serde::{Deserialize, Serialize};
 use rand::Rng;
+use std::process::exit;
 
 mod miio;
 
-struct Device {
-    stamp: u32,
-    did: u32,
-    token: Vec<u8>,
-    coder: bincode::Config,
-    socket: UdpSocket,
-}
-
-impl Device {
-
-    fn find (token: &str, ip: &str, port: &str) -> std::result::Result<Device, String> {
-        let token = hex::decode(token).unwrap();
-        let url = format!("{}:{}", ip, port);
-        let bind_addr = "0.0.0.0:0";
-
-        let socket = UdpSocket::bind(bind_addr).unwrap();
-        socket.set_write_timeout(Some(std::time::Duration::new(5, 0))).unwrap();
-        socket.set_read_timeout(Some(std::time::Duration::new(5, 0))).unwrap();
-
-        let coder = {
-            let mut b = bincode::config();
-            b.big_endian();
-            b
-        };
-
-        let encoded= coder.serialize(&MiioHeader::hello()).unwrap();
-
-        socket.connect(url).unwrap();
-        socket.send(encoded.borrow()).unwrap();
-
-        let mut msg_buffer= [0u8; 32];
-        let size = socket.recv(&mut msg_buffer).unwrap();
-
-        if size != 32 {
-            panic!("Received truncated message");
-        }
-
-
-        let header: MiioHeader = coder.deserialize(&msg_buffer).unwrap();
-
-        Ok(Device {socket, coder, token, stamp: header.stamp, did: header.did})
-    }
-
-}
-
-#[derive(Serialize, Deserialize)]
-struct JsonPayload {
-    id: u32,
-    method: String,
-    params: Vec<String>,
-}
 
 #[test]
 fn aes_decrypt() {
@@ -104,60 +54,150 @@ fn json_test() {
 
 }
 
-fn main() {
+struct Device {
+    stamp: u32,
+    did: u32,
+    token: Vec<u8>,
+    coder: bincode::Config,
+    socket: UdpSocket,
+    key: [u8; 16],
+    iv: [u8; 16],
+}
 
-    let yaml = load_yaml!("cli.yml");
-    let matches = App::from_yaml(yaml).get_matches();
+impl Device {
 
-    let addr = matches.value_of("ip").unwrap();
-    let udp_port = matches.value_of("port").unwrap_or("54321");
-    let token = matches.value_of("token").unwrap();
-    let method = matches.value_of("method").unwrap();
-    let token = matches.value_of("token").unwrap();
+    fn find (token: &str, ip: &str, port: &str) -> std::result::Result<Device, String> {
+        let token = hex::decode(token).unwrap();
+        let url = format!("{}:{}", ip, port);
+        let bind_addr = "0.0.0.0:0";
 
-    let args;
-    if let Some(values) = matches.values_of("arguments") {
-        args = values.map(|s| s.to_owned()).collect();
-    } else {
-        args = vec![];
+        let socket = UdpSocket::bind(bind_addr).unwrap();
+        socket.set_write_timeout(Some(std::time::Duration::new(3, 0))).unwrap();
+        socket.set_read_timeout(Some(std::time::Duration::new(3, 0))).unwrap();
+
+        let coder = {
+            let mut b = bincode::config();
+            b.big_endian();
+            b
+        };
+
+        let encoded= coder.serialize(&MiioHeader::hello()).unwrap();
+
+        socket.connect(url).unwrap();
+        socket.send(encoded.borrow()).unwrap();
+
+        let mut msg_buffer= [0u8; 32];
+        let size = socket.recv(&mut msg_buffer).unwrap();
+
+        if size != 32 {
+            panic!("Received truncated message");
+        }
+
+        let header: MiioHeader = coder.deserialize(&msg_buffer).unwrap();
+
+        if !header.check_header() {
+            return Err("Corrupt message received.".to_owned())
+        }
+
+        let miio::protocol::AesKeys { key, iv } = miio::protocol::gen_aes_keys(token.borrow());
+        Ok(Device { socket, coder, token, stamp: header.stamp, did: header.did, key, iv})
+
     }
 
-    let mut rng = rand::thread_rng();
-    let id = rng.gen();
+    fn send (&mut self, payload : JsonPayload) -> std::io::Result<usize> {
 
-    let status = JsonPayload {id: id, method: method.to_owned(), params: args};
-    let status = serde_json::to_string(&status).unwrap();
+        let mut buffer = [0u8; 4096];
+        let payload = serde_json::to_string(&payload).unwrap();
+        let payload = miio::protocol::aes_encrypt(payload.as_bytes(), &mut buffer, &self.key, &self.iv);
 
-    let mut dev = Device::find(token, addr, udp_port).unwrap();
-    let miio::protocol::AesKeys { key, iv } = miio::protocol::gen_aes_keys(dev.token.borrow());
+        let msg = {
+            let mut msg : Vec<u8>;
 
-    let mut buffer = [0u8; 4096];
-    let status_msg = miio::protocol::aes_encrypt(status.as_bytes(), &mut buffer, &key, &iv);
+            self.stamp += 1;
+            let header_msg = MiioHeader::new(payload.len(), self.did, self.stamp, self.token.borrow());
+            msg = self.coder.serialize(&header_msg).unwrap();
+            msg.extend_from_slice(payload);
 
-    let msg = {
-        let mut msg : Vec<u8>;
+            MiioHeader::insert_checksum(&mut msg);
 
-        dev.stamp += 1;
-        let header_msg = miio::header::MiioHeader::new(status_msg.len(), dev.did, dev.stamp,dev.token.borrow());
-        msg = dev.coder.serialize(&header_msg).unwrap();
-        msg.extend_from_slice(status_msg);
+            msg
+        };
 
-        let checksum = miio::protocol::md5sum(msg.borrow());
-        let checksum_field = &mut msg[0x20 - 16 .. 0x20];
-        checksum_field.copy_from_slice(&checksum);
-        msg
+        self.socket.send(msg.borrow())
+    }
+
+    fn recv (&self) -> String {
+        let mut recv_buffer = [0u8; 4096];
+        let mut decode_buffer = [0u8; 4096];
+
+        let len = self.socket.recv(&mut recv_buffer).unwrap();
+
+        let header_msg = &recv_buffer[..0x20];
+        let header_msg: MiioHeader = self.coder.deserialize(header_msg).unwrap();
+
+        if !header_msg.check(&self.token, &recv_buffer[..len]) {
+            panic!("Received broken message")
+        }
+
+        let payload = &recv_buffer[0x20..header_msg.length as usize];
+        let payload = miio::protocol::aes_decrypt(payload, &mut decode_buffer, &self.key, &self.iv);
+
+        String::from_utf8(payload.to_vec()).expect("Unable to decode received message")
+    }
+
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct JsonPayload {
+    id: u32,
+    method: String,
+    params: Vec<String>,
+}
+
+
+fn parse_args() -> (String, String, String, String, Vec<String>) {
+
+    let yaml = load_yaml!("cli.yml");
+
+    let app = App::from_yaml(yaml);
+    let matches = app.get_matches();
+
+    let addr = matches.value_of("ip");
+    let udp_port = matches.value_of("port").unwrap_or("54321");
+    let method = matches.value_of("method");
+    let token = matches.value_of("token");
+
+    let args : Vec<String> = {
+        let args : Vec<String>;
+        if let Some(values) = matches.values_of("arguments") {
+            args = values.map(|s| s.to_owned()).collect();
+        } else {
+            args = vec![];
+        }
+        args
     };
 
-    dev.socket.send(msg.borrow()).expect("Unable to send message.");
-    let len = dev.socket.recv(&mut buffer).unwrap();
+    if let ( Some(addr), Some(method), Some(token)) = (addr, method, token) {
+        (addr.to_owned(), udp_port.to_owned(), method.to_owned(), token.to_owned(), args)
+    } else {
+        App::from_yaml(yaml).write_help(&mut std::io::stderr()).unwrap();
+        println!();
+        exit(0);
+    }
+}
 
-    let header_msg = &buffer[..0x20];
-    let header_msg : MiioHeader = dev.coder.deserialize(header_msg).unwrap();
+fn main() {
 
-    let mut decode_buffer = [0u8; 4096];
-    let payload = &buffer[0x20..header_msg.length as usize];
-    let recv_msg = miio::protocol::aes_decrypt(payload, &mut decode_buffer, &key, &iv);
+    let (addr, udp_port, method, token, params) = parse_args();
 
-    println!("{}", String::from_utf8(recv_msg.to_vec()).unwrap());
+    let mut dev = Device::find(token.borrow(), addr.borrow(), udp_port.borrow()).unwrap();
+
+    let id = rand::thread_rng().gen();
+    let payload = JsonPayload {id, method: method.to_owned(), params};
+
+    dev.send(payload).expect("Unable to send message");
+    let result = dev.recv();
+
+    println!("{}", result);
 
 }
