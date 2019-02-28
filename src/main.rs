@@ -48,7 +48,7 @@ fn aes_decrypt() {
 #[test]
 fn json_test() {
 
-    let object = JsonPayload {id: 9423, method: String::from("get_status"), params: vec![]};
+    let object : JsonPayload<String> = JsonPayload {id: 9423, method: String::from("get_status"), params: vec!["".to_owned()]};
     let encoded = serde_json::to_string(&object).unwrap();
     assert!(r#"{"id":9423,"method":"get_status","params":[]}"# == encoded);
 
@@ -104,10 +104,12 @@ impl Device {
 
     }
 
-    fn send (&mut self, payload : JsonPayload) -> std::io::Result<usize> {
+    fn send <T> (&mut self, payload : JsonPayload<T>) -> std::io::Result<usize>
+        where T : Serialize {
 
         let mut buffer = [0u8; 4096];
         let payload = serde_json::to_string(&payload).unwrap();
+        println!("{}", payload);
         let payload = miio::protocol::aes_encrypt(payload.as_bytes(), &mut buffer, &self.key, &self.iv);
 
         let msg = {
@@ -148,14 +150,18 @@ impl Device {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct JsonPayload {
+struct JsonPayload <T> {
     id: u32,
     method: String,
-    params: Vec<String>,
+    params: Vec<T>,
 }
 
+enum JsonParams {
+    Ints(Vec<i32>),
+    Strings(Vec<String>),
+}
 
-fn parse_args() -> (String, String, String, String, Vec<String>) {
+fn parse_args () -> (String, String, String, String, JsonParams) {
 
     let yaml = load_yaml!("cli.yml");
 
@@ -167,23 +173,29 @@ fn parse_args() -> (String, String, String, String, Vec<String>) {
     let method = matches.value_of("method");
     let token = matches.value_of("token");
 
-    let args : Vec<String> = {
-        let args : Vec<String>;
-        if let Some(values) = matches.values_of("arguments") {
-            args = values.map(|s| s.to_owned()).collect();
-        } else {
-            args = vec![];
-        }
-        args
-    };
-
-    if let ( Some(addr), Some(method), Some(token)) = (addr, method, token) {
-        (addr.to_owned(), udp_port.to_owned(), method.to_owned(), token.to_owned(), args)
-    } else {
+    if addr.is_none() || addr.is_none() || method.is_none() || token.is_none() {
         App::from_yaml(yaml).write_help(&mut std::io::stderr()).unwrap();
         println!();
         exit(0);
     }
+
+    let mut params : JsonParams = JsonParams::Strings(vec![]);
+
+    if let Some(values) = matches.values_of("arguments") {
+
+        let values : Vec<&str> = values.collect();
+        let is_int = values.get(0).unwrap().parse::<i32>().is_ok();
+
+        if is_int {
+            params = JsonParams::Ints(values.iter().map(|x| x.parse::<i32>().unwrap()).collect());
+        } else {
+            params = JsonParams::Strings(values.iter().map(|&s| String::from(s)).collect());
+        }
+
+    }
+
+    (addr.unwrap().to_owned(), udp_port.to_owned(), method.unwrap().to_owned(), token.unwrap().to_owned(), params)
+
 }
 
 fn main() {
@@ -193,11 +205,19 @@ fn main() {
     let mut dev = Device::find(token.borrow(), addr.borrow(), udp_port.borrow()).unwrap();
 
     let id = rand::thread_rng().gen();
-    let payload = JsonPayload {id, method: method.to_owned(), params};
 
-    dev.send(payload).expect("Unable to send message");
+    match params {
+        JsonParams::Ints(arg) => {
+            let payload = JsonPayload {id, method: method.to_owned(), params: arg};
+            dev.send(payload).expect("Unable to send message");
+        }
+        JsonParams::Strings(arg) => {
+            let payload = JsonPayload {id, method: method.to_owned(), params: arg};
+            dev.send(payload).expect("Unable to send message");
+        }
+    }
+
     let result = dev.recv();
 
     println!("{}", result);
-
 }
