@@ -173,7 +173,7 @@ fn parse_args () -> (String, String, String, String, JsonParams) {
     let method = matches.value_of("method");
     let token = matches.value_of("token");
 
-    if addr.is_none() || addr.is_none() || method.is_none() || token.is_none() {
+    if addr.is_none() || method.is_none() || token.is_none() {
         App::from_yaml(yaml).write_help(&mut std::io::stderr()).unwrap();
         println!();
         exit(0);
