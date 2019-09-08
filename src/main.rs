@@ -71,9 +71,13 @@ impl Device {
         let url = format!("{}:{}", ip, port);
         let bind_addr = "0.0.0.0:0";
 
-        let socket = UdpSocket::bind(bind_addr).unwrap();
-        socket.set_write_timeout(Some(std::time::Duration::new(3, 0))).unwrap();
-        socket.set_read_timeout(Some(std::time::Duration::new(3, 0))).unwrap();
+        let socket = match UdpSocket::bind(bind_addr) {
+            Ok(v) => v,
+            Err(_) => return Err("Failed to Send".to_string()),
+        };
+
+        socket.set_write_timeout(Some(std::time::Duration::new(2, 0))).unwrap();
+        socket.set_read_timeout(Some(std::time::Duration::new(2, 0))).unwrap();
 
         let coder = {
             let mut b = bincode::config();
@@ -81,10 +85,18 @@ impl Device {
             b
         };
 
-        let encoded= coder.serialize(&MiioHeader::hello()).unwrap();
+        let encoded = match coder.serialize(&MiioHeader::hello()) {
+            Ok(v) => v,
+            Err(_) => return Err("Timeout at recv".to_string()),
+        };
 
-        socket.connect(url).unwrap();
-        socket.send(encoded.borrow()).unwrap();
+        if socket.connect(url).is_err() {
+            return Err("Failed to connect".to_string());
+        }
+
+        if socket.send(encoded.borrow()).is_err() {
+            return Err("Failed to send".to_string());
+        }
 
         let mut msg_buffer= [0u8; 32];
         let size = socket.recv(&mut msg_buffer).unwrap();
@@ -109,7 +121,7 @@ impl Device {
 
         let mut buffer = [0u8; 4096];
         let payload = serde_json::to_string(&payload).unwrap();
-        println!("{}", payload);
+        //println!("{}", payload);
         let payload = miio::protocol::aes_encrypt(payload.as_bytes(), &mut buffer, &self.key, &self.iv);
 
         let msg = {
@@ -128,11 +140,14 @@ impl Device {
         self.socket.send(msg.borrow())
     }
 
-    fn recv (&self) -> String {
+    fn recv (&self) -> std::result::Result<String, String> {
         let mut recv_buffer = [0u8; 4096];
         let mut decode_buffer = [0u8; 4096];
 
-        let len = self.socket.recv(&mut recv_buffer).unwrap();
+        let len = match self.socket.recv(&mut recv_buffer) {
+            Ok(v) => v,
+            Err(_) => return Err("Failed to Send".to_string()),
+        };
 
         let header_msg = &recv_buffer[..0x20];
         let header_msg: MiioHeader = self.coder.deserialize(header_msg).unwrap();
@@ -144,7 +159,14 @@ impl Device {
         let payload = &recv_buffer[0x20..header_msg.length as usize];
         let payload = miio::protocol::aes_decrypt(payload, &mut decode_buffer, &self.key, &self.iv);
 
-        String::from_utf8(payload.to_vec()).expect("Unable to decode received message")
+        let mut size=payload.len();
+        if payload[payload.len()-1] == 0x00 {
+            size-=1;
+        }
+
+        let res = payload[..size].to_vec();
+
+        return Ok(String::from_utf8(res).expect("Unable to decode received message"));
     }
 
 }
@@ -199,25 +221,43 @@ fn parse_args () -> (String, String, String, String, JsonParams) {
 }
 
 fn main() {
+    let retries = 10;
+    for _ in 0..retries {
+        if miiocli().is_ok() {
+            break;
+        }
+    }
+}
+
+fn miiocli() -> std::result::Result<(), String> {
 
     let (addr, udp_port, method, token, params) = parse_args();
 
-    let mut dev = Device::find(token.borrow(), addr.borrow(), udp_port.borrow()).unwrap();
+    let mut dev = match Device::find(token.borrow(), addr.borrow(), udp_port.borrow()) {
+        Ok(v) => v,
+        Err(_) => return Err("Failed to connect".to_string()),
+    };
 
     let id = rand::thread_rng().gen();
 
     match params {
         JsonParams::Ints(arg) => {
             let payload = JsonPayload {id, method: method.to_owned(), params: arg};
-            dev.send(payload).expect("Unable to send message");
+            if dev.send(payload).is_err() {
+                return Err("Failed to send".to_string());
+            }
         }
         JsonParams::Strings(arg) => {
             let payload = JsonPayload {id, method: method.to_owned(), params: arg};
-            dev.send(payload).expect("Unable to send message");
+            match dev.send(payload) {
+                Ok(v) => v,
+                Err(_) => return Err("Failed to Send".to_string()),
+            };
         }
-    }
+    };
 
-    let result = dev.recv();
-
+    let result = dev.recv()?;
     println!("{}", result);
+
+    return Ok(())
 }
