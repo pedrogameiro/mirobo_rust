@@ -8,6 +8,8 @@ extern crate hex;
 extern crate crypto;
 extern crate rand;
 
+extern crate colored_json;
+
 use clap::App;
 use std::net::UdpSocket;
 use std::borrow::Borrow;
@@ -15,6 +17,7 @@ use miio::header::MiioHeader;
 use serde::{Deserialize, Serialize};
 use rand::Rng;
 use std::process::exit;
+use colored_json::prelude::*;
 
 mod miio;
 
@@ -257,7 +260,7 @@ fn miiocli() -> std::result::Result<(), String> {
     };
 
     let result = dev.recv()?;
-    println!("{}", result);
+    println!("{}", result.to_colored_json_auto().unwrap());
 
     return Ok(())
 }
