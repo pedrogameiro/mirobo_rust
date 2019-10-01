@@ -1,5 +1,5 @@
 [package]
-name = "hello"
+name = "miioclirust"
 version = "0.1.0"
 authors = ["Pedro Gameiro <pm_gameiro@posteo.org>"]
 edition = "2018"
